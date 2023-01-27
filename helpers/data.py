@@ -2,6 +2,8 @@ import bz2
 import json
 import random
 
+import numpy as np
+import torch
 from discopy_data.data.doc import Document
 from tqdm import tqdm
 
@@ -61,3 +63,37 @@ def iter_document_paragraphs(doc):
 
 def get_sense(sense, level=2):
     return '.'.join(sense.split('.')[:level])
+
+
+simple_map = {
+    "''": '"',
+    "``": '"',
+    "-LRB-": "(",
+    "-RRB-": ")",
+    "-LCB-": "{",
+    "-RCB-": "}",
+    "n't": "not"
+}
+
+
+def get_doc_embeddings(sentences, tokenizer, model, last_hidden_only=False, device='cpu'):
+    tokens = [[simple_map.get(t.surface, t.surface) for t in sent.tokens] for sent in sentences]
+    subtokens = [[tokenizer.tokenize(t) for t in sent] for sent in tokens]
+    lengths = [[len(t) for t in s] for s in subtokens]
+    inputs = tokenizer(tokens, padding=True, return_tensors='pt', is_split_into_words=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs, output_hidden_states=True)
+    if last_hidden_only:
+        hidden_state = outputs.hidden_states[-2].detach().cpu().numpy()
+    else:
+        hidden_state = torch.cat(outputs.hidden_states[-4:], axis=-1).detach().cpu().numpy()
+    embeddings = np.zeros((sum(len(s) for s in tokens), hidden_state.shape[-1]), np.float32)
+    e_i = 0
+    for sent_i, _ in enumerate(inputs['input_ids']):
+        len_left = 1
+        for length in lengths[sent_i]:
+            embeddings[e_i] = hidden_state[sent_i][len_left]
+            len_left += length
+            e_i += 1
+    return embeddings
