@@ -17,18 +17,17 @@ from helpers.senses import ConnSenseDataset, NeuralNetwork
 @click.argument('corpus')
 @click.argument('relation-type')
 @click.option('-b', '--batch-size', type=int, default=8)
-@click.option('-s', '--sense-level', type=int, default=1)
 @click.option('--split-ratio', type=float, default=0.8)
 @click.option('--bert-model', default="roberta-base")
 @click.option('--save-path', default=".")
-def main(corpus, relation_type, batch_size, sense_level, split_ratio, bert_model, save_path):
+def main(corpus, relation_type, batch_size, split_ratio, bert_model, save_path):
     corpus_path = get_corpus_path(corpus)
     cache_path = f'/cache/discourse/{corpus}.en.v3.roberta.joblib'
 
-    conn_dataset = ConnSenseDataset(corpus_path, bert_model, cache_path,
-                                    relation_type=relation_type, relation_sense_level=sense_level)
+    conn_dataset = ConnSenseDataset(corpus_path, bert_model, cache_path, relation_type=relation_type)
     print('SAMPLE', len(conn_dataset), conn_dataset[0])
-    print('LABELS:', conn_dataset.labels)
+    print('LABELS:', conn_dataset.labels_coarse)
+    print('LABELS:', conn_dataset.labels_fine)
     print('LABEL COUNTS:', conn_dataset.get_label_counts())
     dataset_length = len(conn_dataset)
     train_size = int(dataset_length * split_ratio)
@@ -42,17 +41,21 @@ def main(corpus, relation_type, batch_size, sense_level, split_ratio, bert_model
     eval_dataloader = DataLoader(valid_dataset, batch_size=batch_size,
                                  collate_fn=conn_dataset.get_collate_fn())
 
-    label2id = conn_dataset.labels
-    id2label = {v: k for k, v in label2id.items()}
+    label2id_coarse = conn_dataset.labels_coarse
+    id2label_coarse = {v: k for k, v in label2id_coarse.items()}
 
-    model = NeuralNetwork(len(train_dataset[0]['input']), conn_dataset.get_num_labels())
+    label2id_fine = conn_dataset.labels_fine
+    id2label_fine = {v: k for k, v in label2id_fine.items()}
+
+    model = NeuralNetwork(len(train_dataset[0]['input']),
+                          conn_dataset.get_num_labels_coarse(), conn_dataset.get_num_labels_fine())
     optimizer = AdamW(model.parameters(), lr=5e-5)
     ce_loss_fn = nn.CrossEntropyLoss()
 
-    num_epochs = 10
+    num_epochs = 30
     num_training_steps = num_epochs * len(train_dataloader)
     lr_scheduler = get_scheduler(
-        name="linear", optimizer=optimizer, num_warmup_steps=100, num_training_steps=num_training_steps
+        name="linear", optimizer=optimizer, num_warmup_steps=50, num_training_steps=num_training_steps
     )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -66,8 +69,10 @@ def main(corpus, relation_type, batch_size, sense_level, split_ratio, bert_model
         model.train()
         for batch_i, batch in enumerate(train_dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
-            logits = model(batch['inputs'])
-            loss = ce_loss_fn(logits, batch['labels'])
+            logits_coarse, logits_fine = model(batch['inputs'])
+            loss_coarse = ce_loss_fn(logits_coarse, batch['labels_coarse'])
+            loss_fine = ce_loss_fn(logits_fine, batch['labels_fine'])
+            loss = loss_coarse + loss_fine
             loss.backward()
 
             optimizer.step()
@@ -75,19 +80,31 @@ def main(corpus, relation_type, batch_size, sense_level, split_ratio, bert_model
             optimizer.zero_grad()
             progress_bar.update(1)
 
-        metric = evaluate.load("poseval")
+        metric_coarse = evaluate.load("poseval")
+        metric_fine = evaluate.load("poseval")
         model.eval()
         for batch in eval_dataloader:
             batch = {k: v.to(device) for k, v in batch.items()}
             with torch.no_grad():
-                logits = model(batch['inputs'])
-                pred_probab = nn.Softmax(dim=1)(logits)
-                y_pred = pred_probab.argmax(-1)
-            predictions = [id2label[i] for i in y_pred.tolist()]
-            references = [id2label[i] for i in batch['labels'].tolist()]
-            metric.add_batch(predictions=[predictions], references=[references])
+                logits_coarse, logits_fine = model(batch['inputs'])
+                y_pred_coarse = nn.Softmax(dim=1)(logits_coarse).argmax(-1)
+                y_pred_fine = nn.Softmax(dim=1)(logits_fine).argmax(-1)
+            predictions = [id2label_coarse[i] for i in y_pred_coarse.tolist()]
+            references = [id2label_coarse[i] for i in batch['labels_coarse'].tolist()]
+            metric_coarse.add_batch(predictions=[predictions], references=[references])
+            predictions = [id2label_fine[i] for i in y_pred_fine.tolist()]
+            references = [id2label_fine[i] for i in batch['labels_fine'].tolist()]
+            metric_fine.add_batch(predictions=[predictions], references=[references])
 
-        results = metric.compute()
+        results = metric_coarse.compute()
+        for key, vals in results.items():
+            if key == 'accuracy':
+                print(f"{key:32}  {vals * 100:02.2f}")
+            else:
+                print(
+                    f"{key:32}  {vals['precision'] * 100:02.2f}  {vals['recall'] * 100:02.2f}  {vals['f1-score'] * 100:02.2f}  {vals['support']}")
+
+        results = metric_fine.compute()
         for key, vals in results.items():
             if key == 'accuracy':
                 print(f"{key:32}  {vals * 100:02.2f}")
@@ -107,7 +124,8 @@ def main(corpus, relation_type, batch_size, sense_level, split_ratio, bert_model
                 "sched": lr_scheduler.state_dict(),
                 "score": current_score,
                 "config": model.config,
-                "vocab": label2id
+                "vocab_coarse": label2id_coarse,
+                "vocab_fine": label2id_fine,
             }
             torch.save(model_state, os.path.join(save_path,
                                                  f"best_model_{relation_type.lower()}_lvl{sense_level}_sense.pt"))
