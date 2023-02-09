@@ -13,7 +13,7 @@ from helpers.data import get_sense
 def get_bert_features(idxs, doc_bert, used_context=0):
     idxs = list(idxs)
     pad = np.zeros_like(doc_bert[0])
-    embd = doc_bert[idxs].mean(axis=0)
+    embd = np.concatenate([doc_bert[idxs[0]], doc_bert[idxs[-1]], doc_bert[idxs].mean(axis=0)])
     if used_context > 0:
         left = [doc_bert[i] if i >= 0 else pad for i in range(min(idxs) - used_context, min(idxs))]
         right = [doc_bert[i] if i < len(doc_bert) else pad for i in range(max(idxs) + 1, max(idxs) + 1 + used_context)]
@@ -98,11 +98,13 @@ class NeuralNetwork(nn.Module):
         }
         self.flatten = nn.Flatten()
         self.linear_relu_stack = nn.Sequential(
-            nn.Linear(in_size, 512),
+            nn.Dropout(0.3),
+            nn.Linear(in_size, 1024),
             nn.ReLU(),
-            nn.Linear(512, 512),
+            nn.Dropout(0.3),
+            nn.Linear(1024, 256),
             nn.ReLU(),
-            nn.Linear(512, out_size),
+            nn.Dropout(0.3),
         )
         self.linear_coarse = nn.Linear(256, out_size_coarse)
         self.linear_fine = nn.Linear(256, out_size_fine)
