@@ -64,6 +64,7 @@ def main(corpus, relation_type, batch_size, split_ratio, bert_model, save_path):
     progress_bar = tqdm(range(num_training_steps))
 
     best_score = 0.0
+    epochs_no_improvement = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -128,7 +129,13 @@ def main(corpus, relation_type, batch_size, split_ratio, bert_model, save_path):
                 "vocab_fine": label2id_fine,
             }
             torch.save(model_state, os.path.join(save_path,
-                                                 f"best_model_{relation_type.lower()}_lvl{sense_level}_sense.pt"))
+                                                 f"best_model_{relation_type.lower()}_sense.pt"))
+            epochs_no_improvement = 0
+        else:
+            epochs_no_improvement += 1
+            if epochs_no_improvement > 7:
+                print('Early stopping...')
+                break
 
 
 if __name__ == '__main__':

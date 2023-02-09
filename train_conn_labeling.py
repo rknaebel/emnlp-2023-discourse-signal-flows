@@ -56,10 +56,10 @@ def main(corpus_path, relation_type, batch_size, split_ratio, bert_model, save_p
             param.requires_grad = False
     optimizer = AdamW(model.parameters(), lr=5e-5)
 
-    num_epochs = 10
+    num_epochs = 30
     num_training_steps = num_epochs * len(train_dataloader)
     lr_scheduler = get_scheduler(
-        name="linear", optimizer=optimizer, num_warmup_steps=100, num_training_steps=num_training_steps
+        name="linear", optimizer=optimizer, num_warmup_steps=50, num_training_steps=num_training_steps
     )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -68,6 +68,7 @@ def main(corpus_path, relation_type, batch_size, split_ratio, bert_model, save_p
     progress_bar = tqdm(range(num_training_steps))
 
     best_score = 0.0
+    epochs_no_improvement = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -115,6 +116,12 @@ def main(corpus_path, relation_type, batch_size, split_ratio, bert_model, save_p
             print("Store new best model!")
             save_path = os.path.join(save_path, f"best_model_{relation_type.lower()}_label")
             model.save_pretrained(save_path)
+            epochs_no_improvement = 0
+        else:
+            epochs_no_improvement += 1
+            if epochs_no_improvement > 7:
+                print('Early stopping...')
+                break
 
 
 if __name__ == '__main__':
