@@ -5,19 +5,13 @@ import click
 import evaluate
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from transformers import AutoModelForTokenClassification
 
-from helpers.labeling import ConnDataset
-
-
-def compute_loss(num_labels, logits, labels, device):
-    weights = [0.5] + [10.0] * (num_labels - 1)
-    loss_fct = nn.CrossEntropyLoss(weight=torch.tensor(weights, device=device))
-    loss = loss_fct(logits.view(-1, num_labels), labels.view(-1))
-    return loss
+from helpers.data import get_corpus_path
+from helpers.evaluate import score_paragraphs
+from helpers.labeling import ConnDataset, decode_labels
 
 
 def compute_ensemble_prediction(models, batch):
@@ -30,14 +24,14 @@ def compute_ensemble_prediction(models, batch):
 
 
 @click.command()
-@click.argument('corpus-path')
+@click.argument('corpus')
 @click.argument('relation-type')
 @click.option('-b', '--batch-size', type=int, default=8)
-@click.option('--bert-model', default="roberta-base")
 @click.option('--save-path', default=".")
 @click.option('--random-seed', default=42, type=int)
-def main(corpus_path, relation_type, batch_size, bert_model, save_path, random_seed):
-    conn_dataset = ConnDataset(corpus_path, bert_model, relation_type=relation_type)
+def main(corpus, relation_type, batch_size, save_path, random_seed):
+    corpus_path = get_corpus_path(corpus)
+    conn_dataset = ConnDataset(corpus_path, relation_type=relation_type)
     dataset_length = len(conn_dataset)
     train_size = int(dataset_length * 0.9)
     test_size = dataset_length - train_size
@@ -68,7 +62,10 @@ def main(corpus_path, relation_type, batch_size, bert_model, save_path, random_s
 
     metric = evaluate.load("poseval")
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=ConnDataset.get_collate_fn())
-    for batch in tqdm(test_dataloader, total=len(test_dataset) / batch_size):
+
+    signals_pred = []
+    signals_gold = []
+    for batch in tqdm(test_dataloader, total=len(test_dataset) // batch_size, mininterval=5):
         batch = {k: v.to(device) for k, v in batch.items()}
         preds = compute_ensemble_prediction(models, batch)
         predictions = []
@@ -79,9 +76,35 @@ def main(corpus_path, relation_type, batch_size, bert_model, save_path, random_s
             assert len(pred) == len(ref), f"PRED: {pred}, REF {ref}"
             predictions.append(pred)
             references.append(ref)
+            signals_pred.append([[i for p, i in signal] for signal in decode_labels(pred, pred)])
+            signals_gold.append([[i for p, i in signal] for signal in decode_labels(ref, ref)])
         metric.add_batch(predictions=predictions, references=references)
-
     results = metric.compute()
+
+    precision, recall, f1 = score_paragraphs(signals_gold, signals_pred, threshold=0.7)
+    results['partial-match'] = {
+        'precision': precision,
+        'recall': recall,
+        'f1-score': f1,
+        'support': 0,
+    }
+    precision, recall, f1 = score_paragraphs(signals_gold, signals_pred, threshold=0.9)
+    results['exact-match'] = {
+        'precision': precision,
+        'recall': recall,
+        'f1-score': f1,
+        'support': 0,
+    }
+
+    # print(f"==>"
+    #       f"  {results['partial-match']['precision']}"
+    #       f"  {results['partial-match']['recall']}"
+    #       f"  {results['partial-match']['f1-score']}"
+    #       f"  {results['exact-match']['precision']}"
+    #       f"  {results['exact-match']['recall']}"
+    #       f"  {results['exact-match']['f1-score']}"
+    #       )
+
     for key, vals in results.items():
         if key == 'accuracy':
             print(f"{key:10}  {vals * 100:02.2f}")
