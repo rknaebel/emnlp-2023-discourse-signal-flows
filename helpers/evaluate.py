@@ -1,5 +1,7 @@
 # a discourse signal is defined by its type, the corresponding token indices, and its attached sense.
 # signal = (type: ['altlex', 'explicit'], indices: List[int], sense: List[str])
+from collections import defaultdict
+
 import numpy as np
 
 
@@ -24,7 +26,7 @@ def compute_span_f1(g_index_set, p_index_set):
 def evaluate_sense(gold_list, predicted_list, threshold=0.9):
     tp = fp = fn = 0
     gold_to_predicted_map = _link_gold_predicted(gold_list, predicted_list, threshold)
-    for gi, (gtype, gidxs, gs) in enumerate(gold_list):
+    for gi, (gtype, g_span, gs) in enumerate(gold_list):
         if gi in gold_to_predicted_map:
             # TODO check change
             # if any(g.startswith(p) for g in gr.senses for p in predicted_list[gold_to_predicted_map[gi]].senses):
@@ -39,18 +41,11 @@ def evaluate_sense(gold_list, predicted_list, threshold=0.9):
 
 
 def compute_confusion_counts(gold_list, predicted_list, matching_fn, threshold=0.9):
-    """
-    Args:
-        gold_list:
-        predicted_list:
-        matching_fn:
-        threshold:
-    """
     tp = fp = 0
     unmatched = np.ones(len(gold_list), dtype=bool)
-    for predicted_span in predicted_list:
-        for i, gold_span in enumerate(gold_list):
-            if unmatched[i] and matching_fn(gold_span, predicted_span) >= threshold:
+    for ptype, p_span, ps in predicted_list:
+        for i, (gtype, g_span, gs) in enumerate(gold_list):
+            if unmatched[i] and matching_fn(g_span, p_span) >= threshold:
                 tp += 1
                 unmatched[i] = 0
                 break
@@ -114,11 +109,41 @@ def get_surface_tokens_context(doc, idxs, ctx_size=5):
 def score_paragraphs(paragraphs_gold, paragraphs_pred, threshold=0.9):
     counts_altlex = []
     for gold_relations, predicted_relations in zip(paragraphs_gold, paragraphs_pred):
-        # print('GOLD', gold_relations)
-        # print('PRED', predicted_relations)
         altlex_counts, altlex_unmatched = evaluate_signals(gold_relations, predicted_relations, threshold=threshold)
         # for unmatched_idx in altlex_unmatched:
         #     print(get_surface_tokens_context(doc, predicted_relations[unmatched_idx][1], ctx_size=5))
         counts_altlex.append(altlex_counts)
 
     return compute_prf(*np.sum(np.stack(counts_altlex), axis=0))
+
+
+def print_results(results, title=''):
+    print('==========================================================')
+    print(f'Evaluation for discourse relations: {title}')
+    print('==========================================================')
+    print('Conn extractor:               P {:<06.4} R {:<06.4} F1 {:<06.4}'.format(*results['conn']))
+    print('Sense:                        P {:<06.4} R {:<06.4} F1 {:<06.4}'.format(*results['sense']))
+
+
+def score_doc(gold_list, pred_list, threshold=0.9):
+    """
+    Args:
+        gold_doc (Document):
+        pred_doc (Document):
+        threshold:
+    """
+    connective_cm, unmatched = evaluate_signals(gold_list, pred_list, threshold)
+    sense_cm, alignment = evaluate_sense(gold_list, pred_list, threshold)
+    return {
+        'conn': connective_cm,
+        'sense': sense_cm,
+    }
+
+
+def evaluate_docs(gold_docs, pred_docs, threshold=0.9):
+    results = defaultdict(list)
+    for gold_doc, pred_doc in zip(gold_docs, pred_docs):
+        result = score_doc(gold_doc, pred_doc, threshold)
+        for k, v in result.items():
+            results[k].append(v)
+    return {k: compute_prf(*np.sum(np.stack(v), axis=0)) for k, v in results.items()}

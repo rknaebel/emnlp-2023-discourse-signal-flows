@@ -25,14 +25,17 @@ def get_corpus_path(corpus):
     return paths.get(corpus)
 
 
-def load_docs(bzip_file_path):
-    for line_i, line in tqdm(enumerate(bz2.open(filename=bzip_file_path, mode='rt'))):
-        try:
-            yield Document.from_json(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-        except EOFError:
-            break
+def load_docs(bzip_file_path, limit=0):
+    try:
+        for line_i, line in tqdm(enumerate(bz2.open(filename=bzip_file_path, mode='rt')), desc='Load Documents'):
+            if limit and line_i > limit:
+                break
+            try:
+                yield Document.from_json(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except EOFError:
+        print('Stopped iterator')
 
 
 def load_all_datasets():
@@ -61,8 +64,18 @@ def iter_document_paragraphs(doc):
     yield par
 
 
-def get_sense(sense, level=2):
-    return '.'.join(sense.split('.')[:level])
+def get_sense(sense, level=2, simple_sense=False):
+    def simplify(sense_level):
+        if sense_level.lower() == 'negative-condition':
+            return 'Condition'
+        else:
+            return sense_level.split('+')[0]
+
+    if simple_sense:
+        sense_levels = [simplify(sl) for sl in sense.split('.')]
+    else:
+        sense_levels = sense.split('.')
+    return '.'.join(sense_levels[:level])
 
 
 simple_map = {
