@@ -1,5 +1,4 @@
 import glob
-import itertools
 import os
 import random
 import sys
@@ -7,7 +6,9 @@ from collections import Counter, defaultdict
 from typing import List
 from typing import Optional
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from discopy_data.data.relation import Relation
 from torch import BoolTensor
 from torch import FloatTensor
@@ -157,7 +158,7 @@ class SignalLabelDataset(Dataset):
         return collate
 
 
-def decode_labels(labels, probs):
+def decode_labels_gold(labels, probs):
     conns = []
     for tok_i, (label, prob) in enumerate(zip(labels, probs)):
         if label.startswith('S'):
@@ -184,76 +185,100 @@ def decode_labels(labels, probs):
     return conns
 
 
+def decode_labels(labels, probs):
+    conns = []
+    conn_cur = []
+    for tok_i in range(1, len(labels) - 2):
+        if labels[tok_i - 1] != 'O' and labels[tok_i + 1] != 'O':
+            labels[tok_i] = 'I'
+    for tok_i, (label, prob) in enumerate(zip(labels, probs)):
+        if label in {'B', 'I', 'E', 'S'}:
+            conn_cur.append((prob, tok_i))
+        else:
+            if conn_cur:
+                conns.append(conn_cur)
+                conn_cur = []
+    return conns
+
+
 class DiscourseSignalExtractor:
-    def __init__(self, tokenizer, signal_model, relation_type, device='cpu'):
+    def __init__(self, tokenizer, signal_models, relation_type, device='cpu', use_crf=True):
         self.tokenizer = tokenizer
-        self.signal_model = signal_model
+        self.signal_models = signal_models
         self.relation_type = relation_type
         self.device = device
-        self.id2label = signal_model.config.id2label
+        self.id2label = signal_models[0].config.id2label
+        self.use_crf = use_crf
 
     @staticmethod
-    def load_model(save_path, relation_type, device='cpu'):
+    def load_model(save_path, relation_type, device='cpu', use_crf=True):
         save_paths = glob.glob(save_path)
         print(f"Load models: {save_paths}", file=sys.stderr)
         tokenizer = AutoTokenizer.from_pretrained("roberta-base", add_prefix_space=True, local_files_only=True)
-        if len(save_paths) != 1:
-            raise NotImplementedError('Multiple Models Prediction')
-        save_path = save_paths[0]
-        label_save_path = os.path.join(save_path, f"best_model_{relation_type.lower()}_crf")
-        model = RobertaWithCRF.from_pretrained(label_save_path, local_files_only=True)
-        model.eval()
-        model.to(device)
-        return DiscourseSignalExtractor(tokenizer, model, relation_type, device)
+        models = []
+        file_end = 'crf' if use_crf else 'label'
+        if len(save_paths) >= 1:
+            for save_path in save_paths:
+                label_save_path = os.path.join(save_path, f"best_model_{relation_type.lower()}_{file_end}")
+                model = RobertaWithCRF.from_pretrained(label_save_path, local_files_only=True)
+                model.eval()
+                model.to(device)
+                models.append(model)
+        else:
+            raise ValueError('No Models found.')
+        return DiscourseSignalExtractor(tokenizer, models, relation_type, device, use_crf)
 
-    def predict(self, doc, batch_size=16):
-        document_signals = []
-        iter_filtered_paragraphs = filter(lambda p: sum(len(s.tokens) for s in p[1]) >= 7,
-                                          enumerate(iter_document_paragraphs(doc)))
-        while True:
-            par_batch = []
-            par_tokens = []
-            par_idx = []
-            for par_i, paragraph in itertools.islice(iter_filtered_paragraphs, batch_size):
-                par_idx.append(par_i)
-                tokens = [t for s in paragraph for t in s.tokens]
-                par_tokens.append(tokens)
-                par_batch.append([t.surface for t in tokens])
-            if not par_batch:
-                break
-
-            inputs = self.tokenizer(par_batch, truncation=True, is_split_into_words=True,
-                                    padding="max_length", return_tensors='pt')
-            probs, predictions = self.compute_ensemble_prediction(inputs)
-            for b_i, (par_i, tokens, pred, prob) in enumerate(zip(par_idx, par_tokens,
-                                                                  predictions, probs)):
-                word_ids = inputs.word_ids(b_i)
-                predicted_token_class = [self.id2label[t] for t in pred]
-                predicted_token_prob = prob
-                word_id_map = []
-                for i, wi in enumerate(word_ids):
-                    if wi is not None and (len(word_id_map) == 0 or (word_ids[i - 1] != wi)):
-                        word_id_map.append(i)
-
-                signals = decode_labels([predicted_token_class[i] for i in word_id_map],
-                                        [predicted_token_prob[i] for i in word_id_map])
-                signals = [[tokens[i] for p, i in signal] for signal in signals]
-                relations = [{
-                    'tokens_idx': [t.idx for t in signal],
-                    'tokens': [t.surface for t in signal],
-                    'relation_type': self.relation_type,
-                } for signal in signals]
-
-                document_signals.append({
-                    'doc_id': doc.doc_id,
-                    'paragraph_idx': par_i,
-                    'tokens_idx': [t.idx for t in tokens],
-                    'tokens': [t.surface for t in tokens],
-                    'labels': [predicted_token_class[i] for i in word_id_map],
-                    'probs': [round(predicted_token_prob[i], 4) for i in word_id_map],
-                    'relations': relations,
-                })
-        return document_signals
+    # def predict(self, doc, batch_size=16):
+    #     document_signals = []
+    #     iter_filtered_paragraphs = filter(lambda p: sum(len(s.tokens) for s in p[1]) >= 7,
+    #                                       enumerate(iter_document_paragraphs(doc)))
+    #     while True:
+    #         par_batch = []
+    #         par_tokens = []
+    #         par_idx = []
+    #         for par_i, paragraph in itertools.islice(iter_filtered_paragraphs, batch_size):
+    #             par_idx.append(par_i)
+    #             tokens = [t for s in paragraph for t in s.tokens]
+    #             par_tokens.append(tokens)
+    #             par_batch.append([t.surface for t in tokens])
+    #         if not par_batch:
+    #             break
+    #
+    #         inputs = self.tokenizer(par_batch, truncation=True, is_split_into_words=True,
+    #                                 padding="max_length", return_tensors='pt')
+    #         if self.use_crf:
+    #             probs, predictions = self.compute_ensemble_prediction(inputs)
+    #         else:
+    #             probs, predictions = self.compute_ensemble_label_prediction(inputs)
+    #         for b_i, (par_i, tokens, pred, prob) in enumerate(zip(par_idx, par_tokens,
+    #                                                               predictions, probs)):
+    #             word_ids = inputs.word_ids(b_i)
+    #             predicted_token_class = [self.id2label[t] for t in pred]
+    #             predicted_token_prob = prob
+    #             word_id_map = []
+    #             for i, wi in enumerate(word_ids):
+    #                 if wi is not None and (len(word_id_map) == 0 or (word_ids[i - 1] != wi)):
+    #                     word_id_map.append(i)
+    #
+    #             signals = decode_labels([predicted_token_class[i] for i in word_id_map],
+    #                                     [predicted_token_prob[i] for i in word_id_map])
+    #             signals = [[tokens[i] for p, i in signal] for signal in signals]
+    #             relations = [{
+    #                 'tokens_idx': [t.idx for t in signal],
+    #                 'tokens': [t.surface for t in signal],
+    #                 'relation_type': self.relation_type,
+    #             } for signal in signals]
+    #
+    #             document_signals.append({
+    #                 'doc_id': doc.doc_id,
+    #                 'paragraph_idx': par_i,
+    #                 'tokens_idx': [t.idx for t in tokens],
+    #                 'tokens': [t.surface for t in tokens],
+    #                 'labels': [predicted_token_class[i] for i in word_id_map],
+    #                 'probs': [round(predicted_token_prob[i], 4) for i in word_id_map],
+    #                 'relations': relations,
+    #             })
+    #     return document_signals
 
     def predict_paragraphs(self, paragraphs):
         par_batch = []
@@ -265,7 +290,10 @@ class DiscourseSignalExtractor:
 
         inputs = self.tokenizer(par_batch, truncation=True, is_split_into_words=True,
                                 padding="max_length", return_tensors='pt')
-        probs, predictions = self.compute_ensemble_prediction(inputs)
+        if self.use_crf:
+            probs, predictions = self.compute_ensemble_prediction(inputs)
+        else:
+            probs, predictions = self.compute_ensemble_label_prediction(inputs)
         # print("predictions", predictions)
         # print("predictions", len(par_tokens), len(predictions))
         # print(list(map(len, par_tokens)), list(map(len, predictions)))
@@ -279,14 +307,13 @@ class DiscourseSignalExtractor:
                 if wi is not None and (len(word_id_map) == 0 or (word_ids[i - 1] != wi)):
                     word_id_map.append(i)
 
-            # print('word_map', word_id_map, len(word_id_map))
-
             signals = decode_labels([predicted_token_class[i] for i in word_id_map],
                                     [predicted_token_prob[i] for i in word_id_map])
             signals = [[tokens[i] for p, i in signal] for signal in signals]
             relations = [{
                 'tokens_idx': [t.idx for t in signal],
                 'tokens': [t.surface for t in signal],
+                'sentence_idx': list(set(t.sent_idx for t in signal)),
             } for signal in signals]
 
             yield {
@@ -303,24 +330,41 @@ class DiscourseSignalExtractor:
         batch = {k: v.to(self.device) for k, v in batch.items()}
         if 'labels' in batch:
             del batch['labels']
-        # print(batch)
-        # predictions = []
-        # with torch.no_grad():
-        #     for model in self.signal_models:
-        #         outputs = model(**batch)
-        #         predictions.append(F.softmax(outputs.logits, dim=-1))
-        # return torch.max(torch.mean(torch.stack(predictions), dim=0), dim=-1)
+        models_predictions = []
         with torch.no_grad():
-            sequences = self.signal_model.decode(**batch)
-        # sequences = [s[1:-1] for s in sequences]
-        probs = [[1.0 for _ in sequence] for sequence in sequences]
+            for model in self.signal_models:
+                sequences = model.decode(**batch)
+                models_predictions.append(sequences)
+        predictions = []
+        for preds in zip(*models_predictions):
+            predictions.append(merge_list_majority(preds, default_value=0))
+        probs = [[1.0 for _ in prediction] for prediction in predictions]
         return probs, sequences
+
+    def compute_ensemble_label_prediction(self, batch):
+        batch = {k: v.to(self.device) for k, v in batch.items()}
+        predictions = []
+        with torch.no_grad():
+            for model in self.signal_models:
+                logits = model.emissions(**batch)
+                predictions.append(F.softmax(logits, dim=-1))
+        probs, predictions = torch.max(torch.mean(torch.stack(predictions), dim=0), dim=-1)
+        return probs.tolist(), predictions.tolist()
+
+
+def merge_list_majority(preds, default_value=0):
+    merged = []
+    for line in np.stack(preds).T:
+        values, counts = np.unique(line, return_counts=True)
+        ind = np.argmax(counts)
+        merged.append(values[ind] if counts[ind] > 1 else default_value)
+    return merged
 
 
 def compute_loss(logits, labels, device, majority_class_weight=1.0):
     num_labels = logits.size(dim=2)
     weights = [majority_class_weight] + ([1.0] * (num_labels - 1))
-    loss_fct = nn.CrossEntropyLoss(weight=torch.tensor(weights, device=device), ignore_index=7)
+    loss_fct = nn.CrossEntropyLoss(weight=torch.tensor(weights, device=device), ignore_index=7, label_smoothing=0.1)
     loss = loss_fct(logits.view(-1, num_labels), labels.view(-1))
     return loss
 
@@ -332,11 +376,12 @@ class RobertaWithCRF(RobertaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.roberta = RobertaModel(config)
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(0.4)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
         self.linear_crf = LinearCRF(config.num_labels, batch_first=True)
         # Initialize weights and apply final processing
         self.init_weights()
+        self.use_crf = True
 
         for param in self.roberta.embeddings.parameters():
             param.requires_grad = False
@@ -376,23 +421,39 @@ class RobertaWithCRF(RobertaPreTrainedModel):
             for param in self.classifier.parameters():
                 param.requires_grad = False
 
-    def emissions_predict(self, input_ids, labels, token_type_ids=None, attention_mask=None):
-        logits = self.emissions(input_ids, labels, token_type_ids, attention_mask)
-        preds = torch.argmax(logits, dim=-1)
-        predictions = []
-        references = []
-        signals_pred = []
-        signals_gold = []
-        for pred, ref in zip(preds.tolist(), labels.tolist()):
-            pred = [self.config.id2label[p] for i, p in enumerate(pred) if ref[i] != 7]
-            ref = [self.config.id2label[i] for i in ref if i != 7]
-            assert len(pred) == len(ref), f"PRED: {pred}, REF {ref}"
-            predictions.append(pred)
-            references.append(ref)
-            signals_pred.append([(None, [i for p, i in signal], None) for signal in decode_labels(pred, pred)])
-            signals_gold.append([(None, [i for p, i in signal], None) for signal in decode_labels(ref, ref)])
+    def predict(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
+        loss = None
+        if self.use_crf:
+            if labels is not None:
+                loss, preds = self.decode(input_ids, labels, token_type_ids, attention_mask)
+            else:
+                preds = self.decode(input_ids, labels, token_type_ids, attention_mask)
+        else:
+            if labels is not None:
+                loss, logits = self.emissions(input_ids, labels, token_type_ids, attention_mask)
+            else:
+                logits = self.emissions(input_ids, labels, token_type_ids, attention_mask)
+            preds = torch.argmax(logits, dim=-1)
+        return loss, preds
 
-        return logits, predictions, references, signals_pred, signals_gold
+    #     pass
+    # def emissions_predict(self, input_ids, labels, token_type_ids=None, attention_mask=None):
+    #     logits = self.emissions(input_ids, labels, token_type_ids, attention_mask)
+    #     preds = torch.argmax(logits, dim=-1)
+    #     predictions = []
+    #     references = []
+    #     signals_pred = []
+    #     signals_gold = []
+    #     for pred, ref in zip(preds.tolist(), labels.tolist()):
+    #         pred = [self.config.id2label[p] for i, p in enumerate(pred) if ref[i] != 7]
+    #         ref = [self.config.id2label[i] for i in ref if i != 7]
+    #         assert len(pred) == len(ref), f"PRED: {pred}, REF {ref}"
+    #         predictions.append(pred)
+    #         references.append(ref)
+    #         signals_pred.append([(None, [i for p, i in signal], None) for signal in decode_labels(pred, pred)])
+    #         signals_gold.append([(None, [i for p, i in signal], None) for signal in decode_labels(ref, ref)])
+    #
+    #     return logits, predictions, references, signals_pred, signals_gold
 
     def decode(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
         emissions = self.emissions(input_ids=input_ids,
@@ -505,6 +566,7 @@ class LinearCRF(nn.Module):
         denominator = denominator.logsumexp(dim=1)
 
         llh = numerator - denominator
+        # divides the loss by tokens (token mean loss)
         return -llh.sum() / mask.sum()
 
     @torch.no_grad()

@@ -3,15 +3,16 @@ import os
 
 import click
 import evaluate
+import sklearn
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForTokenClassification
 
-from helpers.data import get_corpus_path
+from helpers.data import get_corpus_path, load_docs
 from helpers.evaluate import score_paragraphs
-from helpers.labeling import ConnDataset, decode_labels
+from helpers.labeling import SignalLabelDataset, decode_labels
 
 
 def compute_ensemble_prediction(models, batch):
@@ -26,18 +27,15 @@ def compute_ensemble_prediction(models, batch):
 @click.command()
 @click.argument('corpus')
 @click.argument('relation-type')
-@click.option('-b', '--batch-size', type=int, default=8)
+@click.option('-b', '--batch-size', type=int, default=32)
 @click.option('--save-path', default=".")
 @click.option('--random-seed', default=42, type=int)
 def main(corpus, relation_type, batch_size, save_path, random_seed):
     corpus_path = get_corpus_path(corpus)
-    conn_dataset = ConnDataset(corpus_path, relation_type=relation_type)
-    dataset_length = len(conn_dataset)
-    train_size = int(dataset_length * 0.9)
-    test_size = dataset_length - train_size
-    _, test_dataset = random_split(conn_dataset, [train_size, test_size],
-                                   generator=torch.Generator().manual_seed(random_seed))
-
+    train_docs = list(load_docs(corpus_path))
+    train_docs, test_docs = sklearn.model_selection.train_test_split(train_docs, test_size=0.1,
+                                                                     random_state=random_seed)
+    test_dataset = SignalLabelDataset(test_docs, relation_type=relation_type)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     save_path = os.path.join(save_path, f"best_model_{relation_type.lower()}_label")
@@ -61,7 +59,7 @@ def main(corpus, relation_type, batch_size, save_path, random_seed):
         id2label = models[0].config.id2label
 
     metric = evaluate.load("poseval")
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=ConnDataset.get_collate_fn())
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=SignalLabelDataset.get_collate_fn())
 
     signals_pred = []
     signals_gold = []
@@ -76,8 +74,8 @@ def main(corpus, relation_type, batch_size, save_path, random_seed):
             assert len(pred) == len(ref), f"PRED: {pred}, REF {ref}"
             predictions.append(pred)
             references.append(ref)
-            signals_pred.append([[i for p, i in signal] for signal in decode_labels(pred, pred)])
-            signals_gold.append([[i for p, i in signal] for signal in decode_labels(ref, ref)])
+            signals_pred.append([(relation_type, [i for p, i in signal], None) for signal in decode_labels(pred, pred)])
+            signals_gold.append([(relation_type, [i for p, i in signal], None) for signal in decode_labels(ref, ref)])
         metric.add_batch(predictions=predictions, references=references)
     results = metric.compute()
 

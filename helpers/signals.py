@@ -10,27 +10,6 @@ from helpers.data import get_doc_embeddings, get_paragraph_embeddings
 from helpers.senses import get_bert_features, DiscourseSenseClassifier, DiscourseSenseEnsembleClassifier
 
 
-# def iter_documents_paragraphs(docs):
-#     def fmt(par, par_i):
-#         return {
-#             'doc_id': doc.doc_id,
-#             'paragraph_idx': par_i,
-#             'sentences': par,
-#         }
-#
-#     for doc in docs:
-#         par = []
-#         par_i = 0
-#         for s in doc.sentences:
-#             if len(par) == 0 or (par[-1].tokens[-1].offset_end + 1 == s.tokens[0].offset_begin):
-#                 par.append(s)
-#             else:
-#                 yield fmt(par, par_i)
-#                 par_i += 1
-#                 par = [s]
-#         yield fmt(par, par_i)
-#
-
 class DiscourseSignalModel:
     def __init__(self, tokenizer, signal_model, sense_model_embed, sense_model, no_none_class=False, device='cpu'):
         self.tokenizer = tokenizer
@@ -41,9 +20,9 @@ class DiscourseSignalModel:
         self.device = device
 
     @staticmethod
-    def load_model(save_path, relation_type, no_none_class=False, device='cpu'):
+    def load_model(save_path, relation_type, no_none_class=False, device='cpu', use_crf=True):
         tokenizer = AutoTokenizer.from_pretrained("roberta-base", add_prefix_space=True, local_files_only=True)
-        signal_model = DiscourseSignalExtractor.load_model(save_path, relation_type, device=device)
+        signal_model = DiscourseSignalExtractor.load_model(save_path, relation_type, device=device, use_crf=use_crf)
 
         save_paths = glob.glob(save_path)
         sense_model_embed = AutoModel.from_pretrained("roberta-base", local_files_only=True)
@@ -63,7 +42,6 @@ class DiscourseSignalModel:
             return []
 
         doc_signals = self.signal_model.predict(doc)
-        # print('DEBUG', len(doc_signals), doc_signals)
         for par_i, paragraph in enumerate(doc_signals):
             if paragraph['relations']:
                 features = np.stack([get_bert_features(signal['tokens_idx'], sentence_embeddings,
@@ -116,6 +94,7 @@ class DiscourseSignalModel:
                     relations.append({
                         'tokens_idx': signal['tokens_idx'],
                         'tokens': signal['tokens'],
+                        'sentence_idx': signal['sentence_idx'],
                         'coarse': coarse_class_i,
                         'coarse_probs': round(coarse_class_i_prob, 4),
                         'fine': fine_class_i,

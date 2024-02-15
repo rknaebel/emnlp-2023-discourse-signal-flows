@@ -8,7 +8,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.dummy import DummyClassifier
 from sklearn.feature_extraction.text import TfidfTransformer
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, ConfusionMatrixDisplay, f1_score
 from sklearn.model_selection import train_test_split
 
 column_names = ('corpus,type,doc_id,paragraph,indices,signal,'
@@ -17,7 +17,7 @@ column_names = ('corpus,type,doc_id,paragraph,indices,signal,'
 corpora = ['pdtb3', 'essay', 'ted', 'unsc', 'bbc', 'anthology']
 
 
-def load_dataframe(corpus, relation_type, model_results='v1/m1'):
+def load_dataframe(corpus, relation_type, model_results='v2'):
     paths = glob.glob(f"results/{model_results}/{corpus}.{relation_type}.csv")
     dfs = []
     for path in paths:
@@ -77,22 +77,23 @@ def get_change_flows(seq):
     return [seq[0]] + [j for i, j in enumerate(seq[1:]) if seq[i] != j]
 
 
-def extract_flows_from_df(df, ngrams_sizes=(1, 2, 3), use_change_flows=False, min_flow_count=7, max_flow_count=100):
+def extract_flows_from_df(df, ngrams_sizes=(1, 2, 3), use_change_flows=False, min_flow_count=5, max_flow_count=100):
     documents = defaultdict(Counter)
     for doc_i, (name, group) in enumerate(df.groupby(['corpus', 'doc_id'])):
         sense_flow = group.sort_values(['index0'])['sense2'].to_list()
+        # if len(sense_flow) < min_flow_count:
+        #     continue
         if use_change_flows:
             sense_flow = get_change_flows(sense_flow)
         sense_flow = [s[s.find('.') + 1:] for s in sense_flow]
         sense_flow = ['<pad>'] + sense_flow + ['<pad>']
-        if max_flow_count >= len(sense_flow) >= min_flow_count:
-            for ngram_size in ngrams_sizes:
-                ngrams = map(lambda g: '-'.join(g), get_ngrams(sense_flow, ngram_size))
-                # bigrams = map(lambda g: '-'.join(g), get_ngrams(sense_flow, 2))
-                # trigrams = map(lambda g: '-'.join(g), get_ngrams(sense_flow, 3))
-                # # trigrams_holes = (f'{s1}-X-{s3}' for s1, _, s3 in get_ngrams(sense_change_flow, 3))
-                documents[name] += Counter(
-                    ngrams)  # + Counter(bigrams) + Counter(trigrams)  # + Counter(trigrams_holes)
+        for ngram_size in ngrams_sizes:
+            ngrams = map(lambda g: '-'.join(g), get_ngrams(sense_flow, ngram_size))
+            # bigrams = map(lambda g: '-'.join(g), get_ngrams(sense_flow, 2))
+            # trigrams = map(lambda g: '-'.join(g), get_ngrams(sense_flow, 3))
+            # # trigrams_holes = (f'{s1}-X-{s3}' for s1, _, s3 in get_ngrams(sense_change_flow, 3))
+            documents[name] += Counter(
+                ngrams)  # + Counter(bigrams) + Counter(trigrams)  # + Counter(trigrams_holes)
     return documents
 
 
@@ -104,6 +105,18 @@ def get_flow_counts(df, normalize=True, ngrams=(1, 2, 3), use_change_flows=False
     #     df_ctr[df_ctr >= 1.0] = 1.0
 
     return df_ctr
+
+
+def load_datasets(corpora, ngrams=(1, 2, 3), use_change_flows=True, corpus_name_mapping=None):
+    dfs = []
+    for corpus in corpora:
+        df = load_dataframe(corpus, '*')
+        if corpus_name_mapping:
+            df.corpus = corpus_name_mapping.get(corpus, corpus)
+        df_dist = get_flow_counts(df, ngrams=ngrams, use_change_flows=use_change_flows, normalize=False)
+        dfs.append(df_dist)
+    dfs = pd.concat(dfs).fillna(0)
+    return dfs
 
 
 # from scipy.stats import pearsonr
@@ -143,11 +156,11 @@ def get_flow_counts(df, normalize=True, ngrams=(1, 2, 3), use_change_flows=False
 
 def get_relation_type_results(relation_type, sense_level):
     dfs = []
-    for path in glob.glob(f'results/v1/m1/*.{relation_type}.csv'):
+    for path in glob.glob(f'results/v2/*.{relation_type}.csv'):
         df = pd.read_csv(path, names=column_names)
         df_dist = get_sense_distributions(df, normalize=False, sense_level=f'sense{sense_level}')
         #         df_dist = aggregate_dists(df_dist)
-        df_dist['corpus'] = path[len('results/v1/m1/'):].split('.')[0]
+        df_dist['corpus'] = path[len('results/v2/'):].split('.')[0]
         dfs.append(df_dist)
     # dfs = pd.concat(dfs)
     # return dfs.pivot_table(index='corpus', columns=dfs.index).transpose().fillna(0.0) * 100
@@ -188,14 +201,14 @@ def get_overall_counts(relation_type, sense_level):
 def print_metrics_results(results):
     for key, vals in results.items():
         if key == 'accuracy':
-            print(f"{key:32}  {vals * 100:02.2f}")
+            print(f"{key:32}  {vals * 100:>6.2f}")
         else:
             print(
                 f"{key:32}  "
-                f"{vals['precision'] * 100:05.2f}  "
-                f"{vals['recall'] * 100:05.2f}  "
-                f"{vals['f1-score'] * 100:05.2f}  "
-                f"{vals['support']}")
+                f"{vals['precision'] * 100:>6.2f}  "
+                f"{vals['recall'] * 100:>6.2f}  "
+                f"{vals['f1-score'] * 100:>6.2f}  "
+                f"{vals['support']:>5d}")
     print('## ' + '= ' * 50)
 
 
@@ -224,7 +237,7 @@ def get_connective_candidates(tokens: List[str]):
                             i = sentence.index(c, i)
                             candidate.append((i, c))
                     except ValueError:
-                        print('distant error...', candidate)
+                        print('distant error...', sentence, candidate)
                         continue
                     candidates.append(candidate)
         if word in multi_connectives_first:
@@ -242,26 +255,29 @@ def get_linear_feature_importance(linear_clf, feature_names, top_k=20, save_path
         feature_importance = pd.DataFrame(feature_names, columns=["feature"])
         feature_importance["importance"] = pow(math.e, linear_clf.coef_[c_i])
         feature_importance = feature_importance.sort_values(by=["importance"], ascending=False)
-        ax = feature_importance[:top_k].plot.barh(x='feature', y='importance')
-        plt.title(c)
+        ax = feature_importance[:top_k].plot.barh(x='feature', y='importance', figsize=(8, 5))
+        # plt.title(c)
+        print(c)
         plt.tight_layout()
         if save_path:
             plt.savefig(f'plots/{save_path}_feat_{c}.pdf')
         plt.show()
 
 
-def get_features(dfs_topics, test_size=0.2):
+def get_features(dfs_topics, test_size=0.2, corpus_predictions=False):
     X, y = [], []
 
     for (corpus, doc_id), item in dfs_topics.iterrows():
-        X.append(item[:-1].to_numpy())
-        y.append(item[-1])
-
+        if corpus_predictions:
+            X.append(item.to_numpy())
+            y.append(corpus)
+        else:
+            X.append(item[:-1].to_numpy())
+            y.append(item[-1])
     X = np.stack(X)
     y = np.stack(y)
-
-    print(np.unique(y, return_counts=True))
-    print(X, y)
+    # print(np.unique(y, return_counts=True))
+    # print(X, y)
 
     transform = TfidfTransformer()
     X_transformed = transform.fit_transform(X)
@@ -271,18 +287,49 @@ def get_features(dfs_topics, test_size=0.2):
     return x_train, y_train, x_test, y_test
 
 
+def plot_confusion_senseflows(clf, x_test, y_test, save_path='', labels=None):
+    fig, ax = plt.subplots(figsize=(8, 8))
+    y_test_pred = clf.predict(x_test)
+    cm = ConfusionMatrixDisplay.from_predictions(y_test, y_test_pred, ax=ax, normalize='true', colorbar=False,
+                                                 cmap='YlGnBu',
+                                                 values_format='.2f',
+                                                 labels=labels)
+    # plt.tight_layout()
+    if save_path:
+        plt.savefig(f'plots/clf-senseflow-{save_path}.pdf')
+    plt.show()
+
+
 from sklearn.linear_model import LogisticRegression
 
 
 def get_models(x_train, y_train, x_test, y_test):
-    clf = LogisticRegression(class_weight='balanced', n_jobs=-1)
+    clf = LogisticRegression(class_weight='balanced', n_jobs=-1, max_iter=250, fit_intercept=False)
     clf.fit(x_train, y_train)
-    y_test_pred = clf.predict(x_test)
-    print(classification_report(y_test, y_test_pred))
-
     clf_dummy = DummyClassifier(strategy="stratified")
     clf_dummy.fit(x_train, y_train)
-    y_test_dummy = clf_dummy.predict(x_test)
-    print(classification_report(y_test, y_test_dummy))
-
     return clf, clf_dummy
+
+
+def evaluate_model(clf, x, y, print_results=True):
+    y_pred = clf.predict(x)
+    if print_results:
+        print(classification_report(y, y_pred))
+    domain_genre_map = {
+        'AES': 'Essay', 'PEC': 'Essay', 'ACL': 'Abstract', 'MED': 'Abstract', 'BBC': 'News', 'NYT': 'News',
+        'WSJ': 'News', 'TED': 'Speech', 'UN': 'Speech'
+    }
+    domain_genre_map = np.vectorize(domain_genre_map.get)
+    pred_genre = domain_genre_map(y_pred)
+    y_genre = domain_genre_map(y)
+    if print_results:
+        print(classification_report(y_genre, pred_genre))
+    return f1_score(y, y_pred, average='macro'), f1_score(y_genre, pred_genre, average='macro')
+
+
+def evaluate_model_topic(clf, x, y, print_results=True):
+    y_pred = clf.predict(x)
+    if print_results:
+        print(classification_report(y, y_pred))
+    return f1_score(y, y_pred, average='macro')
+

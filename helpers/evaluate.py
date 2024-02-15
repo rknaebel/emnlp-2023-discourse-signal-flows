@@ -45,7 +45,7 @@ def compute_confusion_counts(gold_list, predicted_list, matching_fn, threshold=0
     unmatched = np.ones(len(gold_list), dtype=bool)
     for ptype, p_span, ps in predicted_list:
         for i, (gtype, g_span, gs) in enumerate(gold_list):
-            if unmatched[i] and matching_fn(g_span, p_span) >= threshold:
+            if unmatched[i] and (matching_fn(g_span, p_span) >= threshold):
                 tp += 1
                 unmatched[i] = 0
                 break

@@ -1,5 +1,8 @@
 import bz2
-import json
+try:
+    import ujson as json
+except ImportError:
+    import json
 import random
 
 import numpy as np
@@ -10,14 +13,20 @@ from tqdm import tqdm
 source_path = '/cache/discourse'
 paths = {
     'pdtb3': f'{source_path}/pdtb3.en.v3.json.bz2',
-    'tedmdb': f'{source_path}/tedmdb.en.v3.json.bz2',
-    'because': f'{source_path}/because.v3.json.bz2',
+    # 'tedmdb': f'{source_path}/tedmdb.en.v3.json.bz2',
+    # 'because': f'{source_path}/because.v3.json.bz2',
     'biodrb': f'{source_path}/biodrb.v2.json.bz2',
     'biocause': f'{source_path}/biocause.v1.json.bz2',
-    'unsc': f'{source_path}/unsc.v1.json.bz2',
-    'ted': f'{source_path}/ted.v1.json.bz2',
-    'anthology': f'{source_path}/anthology.v1.json.bz2',
-    'essay': f'{source_path}/essay.v1.json.bz2',
+    'unsc': f'{source_path}/unsc.v2.json.bz2',
+    'unsc-parla': f'{source_path}/unsc.parla.json.bz2',
+    'ted': f'{source_path}/ted.v3.json.bz2',
+    'anthology': f'{source_path}/anthology.v4.json.bz2',
+    'essay': f'{source_path}/essay.v3.json.bz2',
+    'bbc': f'{source_path}/bbc.v2.json.bz2',
+    'nyt': f'{source_path}/nyt.v4.json.bz2',
+    # 'nyt-full': f'{source_path}/nyt.v5.json.bz2',
+    'aes': f'{source_path}/asap-aes.v1.json.bz2',
+    'pubmed': f'{source_path}/pubmed.v1.json.bz2',
 }
 
 
@@ -89,24 +98,53 @@ simple_map = {
 }
 
 
-def get_doc_embeddings(sentences, tokenizer, model, last_hidden_only=False, device='cpu'):
-    tokens = [[simple_map.get(t.surface, t.surface) for t in sent.tokens] for sent in sentences]
-    subtokens = [[tokenizer.tokenize(t) for t in sent] for sent in tokens]
-    lengths = [[len(t) for t in s] for s in subtokens]
-    inputs = tokenizer(tokens, padding=True, return_tensors='pt', is_split_into_words=True)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    with torch.no_grad():
-        outputs = model(**inputs, output_hidden_states=True)
-    if last_hidden_only:
-        hidden_state = outputs.hidden_states[-2].detach().cpu().numpy()
-    else:
-        hidden_state = torch.cat(outputs.hidden_states[-4:], axis=-1).detach().cpu().numpy()
-    embeddings = np.zeros((sum(len(s) for s in tokens), hidden_state.shape[-1]), np.float32)
-    e_i = 0
-    for sent_i, _ in enumerate(inputs['input_ids']):
-        len_left = 1
-        for length in lengths[sent_i]:
-            embeddings[e_i] = hidden_state[sent_i][len_left]
-            len_left += length
-            e_i += 1
-    return embeddings
+def get_doc_embeddings(doc, tokenizer, model, last_hidden_only=False, device='cpu'):
+    doc_embed = []
+    for paragraph in iter_document_paragraphs(doc):
+        tokens = [[simple_map.get(t.surface, t.surface) for t in sent.tokens] for sent in paragraph]
+        subtokens = [[tokenizer.tokenize(t) for t in sent] for sent in tokens]
+        lengths = [[len(t) for t in s] for s in subtokens]
+        inputs = tokenizer(tokens, padding=True, return_tensors='pt', is_split_into_words=True)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = model(**inputs, output_hidden_states=True)
+        if last_hidden_only:
+            hidden_state = outputs.hidden_states[-2].detach().cpu().numpy()
+        else:
+            hidden_state = torch.cat(outputs.hidden_states[1:-1], axis=-1).detach().cpu().numpy()
+        embeddings = np.zeros((sum(len(s) for s in tokens), hidden_state.shape[-1]), np.float32)
+        e_i = 0
+        for sent_i, _ in enumerate(inputs['input_ids']):
+            len_left = 1
+            for length in lengths[sent_i]:
+                embeddings[e_i] = hidden_state[sent_i][len_left]
+                len_left += length
+                e_i += 1
+        doc_embed.append(embeddings)
+    return np.concatenate(doc_embed)
+
+
+def get_paragraph_embeddings(paragraphs, tokenizer, model, last_hidden_only=False, device='cpu'):
+    par_embed = []
+    for paragraph in paragraphs:
+        tokens = [[simple_map.get(t.surface, t.surface) for t in sent.tokens] for sent in paragraph['sentences']]
+        subtokens = [[tokenizer.tokenize(t) for t in sent] for sent in tokens]
+        lengths = [[len(t) for t in s] for s in subtokens]
+        inputs = tokenizer(tokens, padding=True, return_tensors='pt', is_split_into_words=True)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = model(**inputs, output_hidden_states=True)
+        if last_hidden_only:
+            hidden_state = outputs.hidden_states[-2].detach().cpu().numpy()
+        else:
+            hidden_state = torch.cat(outputs.hidden_states[1:-1], axis=-1).detach().cpu().numpy()
+        embeddings = np.zeros((sum(len(s) for s in tokens), hidden_state.shape[-1]), np.float32)
+        e_i = 0
+        for sent_i, _ in enumerate(inputs['input_ids']):
+            len_left = 1
+            for length in lengths[sent_i]:
+                embeddings[e_i] = hidden_state[sent_i][len_left]
+                len_left += length
+                e_i += 1
+        par_embed.append(embeddings)
+    return par_embed

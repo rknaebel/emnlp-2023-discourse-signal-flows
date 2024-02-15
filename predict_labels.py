@@ -1,5 +1,6 @@
 import itertools
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,7 +39,8 @@ def iter_documents_paragraphs(docs):
 @click.option('-r', '--replace', is_flag=True)
 @click.option('-o', '--output-path', default='-')
 @click.option('-b', '--batch-size', default=32, type=int)
-def main(corpus, relation_type, save_path, replace, output_path, batch_size):
+@click.option('--use-crf', default=True, type=bool)
+def main(corpus, relation_type, save_path, replace, output_path, batch_size, use_crf):
     if output_path == '-':
         output = sys.stdout
     else:
@@ -51,9 +53,13 @@ def main(corpus, relation_type, save_path, replace, output_path, batch_size):
             output = output_path.open('w')
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    signal_model = DiscourseSignalExtractor.load_model(save_path, relation_type, device=device)
+    signal_model = DiscourseSignalExtractor.load_model(save_path, relation_type, device=device, use_crf=use_crf)
 
-    corpus_path = get_corpus_path(corpus)
+    if os.path.isfile(corpus):
+        corpus_path = corpus
+    else:
+        corpus_path = get_corpus_path(corpus)
+
     paragraphs = filter(lambda p: sum(len(s.tokens) for s in p['sentences']) > 7,
                         iter_documents_paragraphs(load_docs(corpus_path)))
     while True:

@@ -311,52 +311,52 @@ class DiscourseSenseEnsembleClassifier(nn.Module):
         }
 
 
-class DiscourseSignalDisambiguationModel(nn.Module):
-    def __init__(self, in_size, relation_type='both', hidden=(2048, 512), drop_rate=0.3):
-        super().__init__()
-        self.relation_type = relation_type
-        self.config = {
-            'in_size': in_size,
-            'hidden': hidden,
-            'drop_rate': drop_rate,
-        }
-        self.flatten = nn.Flatten()
-        hidden_1, hidden_2 = hidden
-        self.linear_relu_stack = nn.Sequential(
-            nn.Dropout(drop_rate),
-            nn.Linear(in_size, hidden_1),
-            nn.ReLU(),
-            nn.Dropout(drop_rate),
-            nn.Linear(hidden_1, hidden_2),
-            nn.ReLU(),
-            nn.Dropout(drop_rate),
-        )
-        self.final = nn.Linear(hidden_2, 2)
-
-    @staticmethod
-    def load(save_path, relation_type='both'):
-        sense_save_path = os.path.join(save_path, f"best_model_{relation_type}_dis.pt")
-        sense_model_state = torch.load(sense_save_path)
-        sense_model = DiscourseSignalDisambiguationModel(**sense_model_state['config'])
-        sense_model.load_state_dict(sense_model_state['model'])
-        return sense_model
-
-    def save(self, save_path, model_state):
-        os.makedirs(save_path, exist_ok=True)
-        torch.save(model_state, os.path.join(save_path, f"best_model_{self.relation_type}_dis.pt"))
-
-    def forward(self, x):
-        x = self.flatten(x)
-        y_inter = self.linear_relu_stack(x)
-        logits = self.final(y_inter)
-        return logits
-
-    def predict(self, features):
-        with torch.no_grad():
-            outputs = self(features)
-        probs = F.softmax(outputs, dim=-1).detach().cpu().numpy()
-        return {
-            "is_relation": probs[:, 1].round().astype(int),
-            "is_relation_probs": probs[:, 1],
-            "logits": outputs,
-        }
+# class DiscourseSignalDisambiguationModel(nn.Module):
+#     def __init__(self, in_size, relation_type='both', hidden=(2048, 512), drop_rate=0.3):
+#         super().__init__()
+#         self.relation_type = relation_type
+#         self.config = {
+#             'in_size': in_size,
+#             'hidden': hidden,
+#             'drop_rate': drop_rate,
+#         }
+#         self.flatten = nn.Flatten()
+#         hidden_1, hidden_2 = hidden
+#         self.linear_relu_stack = nn.Sequential(
+#             nn.Dropout(drop_rate),
+#             nn.Linear(in_size, hidden_1),
+#             nn.ReLU(),
+#             nn.Dropout(drop_rate),
+#             nn.Linear(hidden_1, hidden_2),
+#             nn.ReLU(),
+#             nn.Dropout(drop_rate),
+#         )
+#         self.final = nn.Linear(hidden_2, 2)
+#
+#     @staticmethod
+#     def load(save_path, relation_type='both'):
+#         sense_save_path = os.path.join(save_path, f"best_model_{relation_type}_dis.pt")
+#         sense_model_state = torch.load(sense_save_path)
+#         sense_model = DiscourseSignalDisambiguationModel(**sense_model_state['config'])
+#         sense_model.load_state_dict(sense_model_state['model'])
+#         return sense_model
+#
+#     def save(self, save_path, model_state):
+#         os.makedirs(save_path, exist_ok=True)
+#         torch.save(model_state, os.path.join(save_path, f"best_model_{self.relation_type}_dis.pt"))
+#
+#     def forward(self, x):
+#         x = self.flatten(x)
+#         y_inter = self.linear_relu_stack(x)
+#         logits = self.final(y_inter)
+#         return logits
+#
+#     def predict(self, features):
+#         with torch.no_grad():
+#             outputs = self(features)
+#         probs = F.softmax(outputs, dim=-1).detach().cpu().numpy()
+#         return {
+#             "is_relation": probs[:, 1].round().astype(int),
+#             "is_relation_probs": probs[:, 1],
+#             "logits": outputs,
+#         }

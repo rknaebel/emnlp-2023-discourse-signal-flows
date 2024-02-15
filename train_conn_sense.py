@@ -1,4 +1,5 @@
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import click
@@ -91,15 +92,15 @@ def main(corpus, predictions, batch_size, split_ratio, save_path, test_set, rand
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model.to(device)
 
-    progress_bar = tqdm(range(num_training_steps))
-
     best_score = 0.0
     epochs_no_improvement = 0
     weights_coarse, weights_fine = compute_weights(labels_coarse, labels_fine)
 
     for epoch in range(num_epochs):
         model.train()
-        for batch_i, batch in enumerate(train_dataloader):
+        losses = []
+        for batch_i, batch in tqdm(enumerate(train_dataloader), total=len(train_dataloader), mininterval=5,
+                                   desc='Training'):
             batch = {k: v.to(device) for k, v in batch.items()}
             logits_coarse, logits_fine = model(batch['inputs'])
             loss_coarse = compute_loss(len(labels_coarse), weights_coarse,
@@ -107,19 +108,21 @@ def main(corpus, predictions, batch_size, split_ratio, save_path, test_set, rand
             loss_fine = compute_loss(len(labels_fine), weights_fine,
                                      logits_fine, batch['labels_fine'], device)
             loss = loss_coarse + loss_fine * 2.0
+            losses.append(loss.item())
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
 
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-            progress_bar.update(1)
+        loss_training = np.mean(losses)
 
         metric_coarse = evaluate.load("poseval")
         metric_fine = evaluate.load("poseval")
         model.eval()
         scores = []
+        losses = defaultdict(list)
         for relation_type, eval_dataloader in [('explicit', eval_conn_dataloader), ('altlex', eval_altlex_dataloader)]:
-            losses = []
             print(f"##\n## EVAL ({epoch}) {relation_type}\n##")
             for batch in eval_dataloader:
                 batch = {k: v.to(device) for k, v in batch.items()}
@@ -129,7 +132,7 @@ def main(corpus, predictions, batch_size, split_ratio, save_path, test_set, rand
                 loss_fine = compute_loss(len(labels_fine), weights_fine,
                                          output['fine_logits'], batch['labels_fine'], device)
                 loss = loss_coarse + loss_fine * 2.0
-                losses.append(loss.item())
+                losses[relation_type].append(loss.item())
 
                 references = [id2label_coarse[i] for i in batch['labels_coarse'].tolist()]
                 metric_coarse.add_batch(predictions=[output['coarse']], references=[references])
@@ -137,18 +140,20 @@ def main(corpus, predictions, batch_size, split_ratio, save_path, test_set, rand
                 metric_fine.add_batch(predictions=[output['fine']], references=[references])
 
             results_coarse = metric_coarse.compute(zero_division=0)
-            # print_metrics_results(results_coarse)
             scores.append(results_coarse['macro avg']['f1-score'])
 
             results_fine = metric_fine.compute(zero_division=0)
             print_metrics_results(results_fine)
             scores.append(results_fine['macro avg']['f1-score'])
 
-            print(f'Loss {relation_type}: {np.mean(losses)}')
+        print(f'\nTraining Loss: {loss_training}')
+        print(f'Validation Loss Both: {np.mean(losses["explicit"] + losses["altlex"])}')
+        print(f'Validation Loss Explicit: {np.mean(losses["explicit"])}')
+        print(f'Validation Loss Altlex: {np.mean(losses["altlex"])}')
 
         current_score = np.mean(scores)
         if current_score > best_score:
-            print(f"Store new best model! Score: {current_score}...")
+            print(f"-- Store new best model! Score: {current_score}...")
             best_score = current_score
             model_state = {
                 "epoch": epoch,
