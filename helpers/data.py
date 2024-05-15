@@ -62,10 +62,25 @@ def split_train_test(xs, ratio=0.9):
     return xs[:num_samples], xs[num_samples:]
 
 
-def iter_document_paragraphs(doc):
+def iter_document_paragraphs(doc, tokenizer=None):
     par = []
     for s in doc.sentences:
+        sent_tokens = [t.surface for t in s.tokens]
+        if len(sent_tokens) > 300:
+            raise ValueError("Sentence exceeds subtoken length")
         if len(par) == 0 or (par[-1].tokens[-1].offset_end + 1 == s.tokens[0].offset_begin):
+            if tokenizer is None:
+                par_len = len([t for s in par for t in s.tokens])
+                sent_len = len(sent_tokens)
+                if par_len + sent_len > 300:
+                    yield par
+                    par = []
+            else:
+                par_len = len(tokenizer.tokenize(' '.join(t.surface for sent in par for t in sent.tokens)))
+                sent_len = len(tokenizer.tokenize(' '.join(sent_tokens)))
+                if par_len + sent_len > 400:
+                    yield par
+                    par = []
             par.append(s)
         else:
             yield par
@@ -100,28 +115,39 @@ simple_map = {
 
 def get_doc_embeddings(doc, tokenizer, model, last_hidden_only=False, device='cpu'):
     doc_embed = []
-    for paragraph in iter_document_paragraphs(doc):
-        tokens = [[simple_map.get(t.surface, t.surface) for t in sent.tokens] for sent in paragraph]
-        subtokens = [[tokenizer.tokenize(t) for t in sent] for sent in tokens]
-        lengths = [[len(t) for t in s] for s in subtokens]
-        inputs = tokenizer(tokens, padding=True, return_tensors='pt', is_split_into_words=True)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = model(**inputs, output_hidden_states=True)
-        if last_hidden_only:
-            hidden_state = outputs.hidden_states[-2].detach().cpu().numpy()
-        else:
-            hidden_state = torch.cat(outputs.hidden_states[1:-1], axis=-1).detach().cpu().numpy()
-        embeddings = np.zeros((sum(len(s) for s in tokens), hidden_state.shape[-1]), np.float32)
-        e_i = 0
-        for sent_i, _ in enumerate(inputs['input_ids']):
-            len_left = 1
-            for length in lengths[sent_i]:
-                embeddings[e_i] = hidden_state[sent_i][len_left]
-                len_left += length
-                e_i += 1
-        doc_embed.append(embeddings)
-    return np.concatenate(doc_embed)
+    try:
+        for paragraph in iter_document_paragraphs(doc, tokenizer):
+            if not paragraph:
+                return None
+            tokens = [[simple_map.get(t.surface, t.surface) for t in sent.tokens] for sent in paragraph]
+            subtokens = [[tokenizer.tokenize(t) for t in sent] for sent in tokens]
+            lengths = [[len(t) for t in s] for s in subtokens]
+            if any(min(ls) == 0 for ls in lengths):
+                return None
+            inputs = tokenizer(tokens, padding=True, return_tensors='pt', is_split_into_words=True)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model(**inputs, output_hidden_states=True)
+            if last_hidden_only:
+                hidden_state = outputs.hidden_states[-2].detach().cpu().numpy()
+            else:
+                hidden_state = torch.cat(outputs.hidden_states[1:-1], axis=-1).detach().cpu().numpy()
+            embeddings = np.zeros((sum(len(s) for s in tokens), hidden_state.shape[-1]), np.float32)
+            e_i = 0
+            for sent_i, _ in enumerate(inputs['input_ids']):
+                len_left = 1
+                for length in lengths[sent_i]:
+                    embeddings[e_i] = hidden_state[sent_i][len_left]
+                    len_left += length
+                    e_i += 1
+            doc_embed.append(embeddings)
+        return np.concatenate(doc_embed)
+    except ValueError as e:
+        print(e)
+        return None
+    except RuntimeError as e:
+        print(e)
+        return None
 
 
 def get_paragraph_embeddings(paragraphs, tokenizer, model, last_hidden_only=False, device='cpu'):

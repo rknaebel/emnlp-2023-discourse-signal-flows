@@ -231,15 +231,19 @@ def get_connective_candidates(tokens: List[str]):
             if word == conn[0]:
                 if all(c in sentence for c in conn[1:]):
                     candidate = [(word_idx, conn[0])]
-                    try:
-                        i = word_idx
-                        for c in conn[1:]:
-                            i = sentence.index(c, i)
+                    i = word_idx
+                    ci = 1
+                    while i < len(sentence):
+                        if ci >= len(conn):
+                            return candidates
+                        c = conn[ci]
+                        w = sentence[i]
+                        if c == w:
                             candidate.append((i, c))
-                    except ValueError:
-                        print('distant error...', sentence, candidate)
-                        continue
-                    candidates.append(candidate)
+                            ci += 1
+                        i += 1
+                    if ci == len(conn):
+                        candidates.append(candidate)
         if word in multi_connectives_first:
             for multi_conn in multi_connectives:
                 if (word_idx + len(multi_conn)) <= len(sentence) and all(
